@@ -1,0 +1,294 @@
+#include <Adafruit_Fingerprint.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+#include <EEPROM.h>
+
+SoftwareSerial mySerial(11, 10);
+
+#include <TinyGPS++.h>
+#include <Wire.h>
+#include "I2CKeyPad.h"
+#include <GPRS_Shield_Arduino.h>
+#define BAUDRATE  9600
+
+
+#define BUZZER 2
+#define STARTER A10
+#define ENGINE A8
+#define SIRINE A6
+
+#define PLACE_FINGER 0
+#define INPUT_KEY 1
+#define OPENED 2
+#define ALARM_ON 3
+String PRIMARY_PHONE_NUMBER = "+6281331161461";    //NOMOR TELEPON TUJUAN
+const uint8_t KEYPAD_ADDRESS = 0x20;
+
+TinyGPSPlus gps;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&Serial1);
+I2CKeyPad keypad(KEYPAD_ADDRESS);
+GPRS gprs(15, 14, BAUDRATE); //RX,TX,BaudRate
+
+uint32_t lastKeyPressed = 0;
+char keys[] = "123A456B789C*0#DNF";
+
+uint8_t STEP = PLACE_FINGER;
+String KEYPASS = "";
+String KEYPASS_FINGER = "111111";
+
+bool S_ALARM = false;
+String tmp_key = "";
+String tmp_sms = "";
+bool tmp_sms_rec = false;
+byte tmp_sms_line = 0;
+String tmp_sender_number = "";
+String tmp_sms_msg = ""; 
+
+String latt = "";
+String lngt = "";
+
+char buff[16];
+uint8_t ERROR_RETRY = 0;
+uint8_t MAX_RETRY = 3;
+int8_t ID_MENU = 0;
+String MENU[4] = {
+  "START ENGINE",
+  "ENROLL",
+  "EXIT",
+  "STOP ENGINE"
+};
+unsigned long prevMillisAlarm = 0;
+
+int idku = 0;
+
+void setup() {
+  lcd.begin();
+  lcd.setCursor(0, 0); lcd.print("Initializing");
+  pinMode(BUZZER, OUTPUT);
+  pinMode(STARTER, OUTPUT);
+  pinMode(ENGINE, OUTPUT);
+  pinMode(SIRINE, OUTPUT);
+
+  digitalWrite(STARTER, LOW);
+  digitalWrite(ENGINE, LOW);
+  digitalWrite(SIRINE, LOW);
+
+  Serial.begin(9600);
+  Serial2.begin(9600);
+  Serial3.begin(9600);
+
+
+  setup_string();
+  setup_receive_sms();
+  setup_fingerprint();
+
+  if (keypad.begin() == false)
+  {
+    lcd.clear();
+    lcd.print("KEYPAD ERROR");
+    while (1);
+  }
+
+  Serial.println("Ready\n");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Letakkan jari ");
+
+}
+
+void loop() {
+awal:
+  Serial.println(S_ALARM);
+  serialEvent3();
+  serialEvent2();
+
+  if (S_ALARM) {
+    if ((millis() - prevMillisAlarm) >= 500) {
+      prevMillisAlarm = millis();
+      digitalWrite(BUZZER, !digitalRead(BUZZER)); // SIRINE A6
+      digitalWrite(SIRINE, !digitalRead(SIRINE));
+    }
+  }
+
+  if (STEP == PLACE_FINGER) {
+    uint8_t fingerid = getFingerprintID();
+    if (fingerid == FINGERPRINT_NOTFOUND) {
+      ERROR_RETRY++;
+      if (ERROR_RETRY >= MAX_RETRY) {
+        Serial.print("==================================");
+        Serial.println(ERROR_RETRY);
+        lcd.setCursor(0, 1);
+        lcd.print("Alarm ON");
+        prevMillisAlarm = millis();
+        S_ALARM = true;
+        make_call(PRIMARY_PHONE_NUMBER); //Change to Send SMS
+        //        String la = "-7.3244064"; //Fake
+        //        String lo = "112.7986946"; //Fake
+        String out = "BAHAYA: ";
+        out += "http://maps.google.com/maps?q=";
+        out += latt;
+        out += ",";
+        out += lngt;
+        send_sms(PRIMARY_PHONE_NUMBER, out);
+        delay(5000);
+        ERROR_RETRY = 0;
+        //S_ALARM =  false;
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("Sidik Jari salah!!");
+        digitalWrite(BUZZER, HIGH); delay(100);
+        digitalWrite(BUZZER, LOW); delay(100);
+        digitalWrite(BUZZER, HIGH); delay(100);
+        digitalWrite(BUZZER, LOW); delay(100);
+        digitalWrite(BUZZER, HIGH); delay(100);
+        digitalWrite(BUZZER, LOW); delay(100);
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Letakkan Jari");
+      }
+    } else if (fingerid == FINGERPRINT_OK) {
+      digitalWrite(SIRINE, LOW);
+      S_ALARM = false;
+      digitalWrite(BUZZER, LOW);
+      ERROR_RETRY = 0;
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Input Key");
+      lcd.setCursor(0, 1);
+      STEP = INPUT_KEY;
+      digitalWrite(BUZZER, HIGH); delay(100);
+      digitalWrite(BUZZER, LOW);
+    }
+    delay(50);
+  } else if (STEP == INPUT_KEY) {
+    char key = keys[keypad.getKey()];
+    if (key != 'N') {
+      if (key != '#' || key != '*') {
+        beep(1);
+        tmp_key += key;
+        lcd.print(key);
+        delay(100);
+        if (tmp_key.length() >= 6) {
+          if (tmp_key == KEYPASS_FINGER) {
+            tmp_key = "";
+            STEP = OPENED;
+            lcd.clear();
+            print_menu(ID_MENU);
+          } else {
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Password salah");
+            delay(1000);
+            tmp_key = "";
+            lcd.clear();
+            lcd.setCursor(0, 0); lcd.print("masukkan Password");
+            lcd.setCursor(0, 1);
+          }
+        }
+      }
+
+      tunggu('N');
+    }
+  } else if (STEP == OPENED) {
+    char key = keys[keypad.getKey()];
+    if (key == '*') {
+      beep(1);
+      tunggu('*');
+      ID_MENU--;
+      if (ID_MENU == -1) ID_MENU = 3;
+      print_menu(ID_MENU);
+    } else if (key == '#') {
+      beep(1);
+      tunggu('#');
+      ID_MENU++;
+      if (ID_MENU == 4) ID_MENU = 0;
+      print_menu(ID_MENU);
+    } else if (key == 'D') {
+      switch (ID_MENU) {
+        case 0: { //Start engine
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Starting engine");
+            digitalWrite(ENGINE, HIGH);
+            digitalWrite(STARTER, HIGH);
+            delay(3000);
+            digitalWrite(STARTER, LOW);
+            print_menu(ID_MENU);
+          }
+          break;
+
+        case 1: { //Enroll
+            enroll();
+          }
+          break;
+
+        case 2: { //Exit
+            STEP = PLACE_FINGER;
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Letakkan jari");
+          }
+          break;
+
+        case 3: { //Stop engine
+            digitalWrite(ENGINE, LOW);
+          }
+          break;
+      }
+    }
+    if (ID_MENU == 0) {
+      if (latt != "INVALID" && lngt != "INVALID"  ) {
+
+        lcd.setCursor(0, 1);
+        lcd.print(latt);
+        lcd.print(" ");
+        lcd.print(lngt);
+        lcd.print(" ");
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("INVALID");
+        lcd.print(" ");
+        lcd.print("INVALID");
+      }
+    }
+  }
+}
+
+
+void setup_string() {
+  PRIMARY_PHONE_NUMBER.reserve(16);
+  KEYPASS.reserve(6);
+  tmp_key.reserve(6);
+  latt.reserve(12);
+  lngt.reserve(12);
+  tmp_sms.reserve(256);
+  tmp_sender_number.reserve(16);
+  tmp_sms_msg.reserve(256);
+}
+
+
+
+void print_menu(uint8_t index) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(MENU[index]);
+}
+
+bool tunggu(char data) {
+  char key = data;
+  while (key == data) {
+    key = keys[keypad.getKey()];
+  }
+}
+
+
+void beep(int a) {
+  for (int i = 0; i < a; i++) {
+    digitalWrite(BUZZER, HIGH);
+    delay(100);
+    digitalWrite(BUZZER, LOW);
+    delay(100);
+
+  }
+}
